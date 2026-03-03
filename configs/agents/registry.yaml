@@ -1,0 +1,21 @@
+schema_version: "1.0"
+entries:
+  - id: finance-router-agent
+    capabilities:
+      - finance.analysis
+      - planning.decompose
+    entrypoint: agents.finance_router:run
+    dependencies:
+      - http-rag
+    healthcheck: python -m healthcheck.finance_router
+    version: "0.1.0"
+
+  - id: support-triage-agent
+    capabilities:
+      - support.troubleshoot
+      - recovery.heal
+    entrypoint: agents.support_triage:run
+    dependencies:
+      - toolkit-runtime
+    healthcheck: python -m healthcheck.support_triage
+    version: "0.1.0"
