@@ -13,6 +13,7 @@ import argparse
 import json
 from pathlib import Path
 
+from config.model_config import load_model_config  # 模型配置加载器
 from observability.metrics import MetricsCollector  # 指标收集器，用于记录运行时指标
 from orchestrator.agentscope_executor import AgentScopeReActExecutor  # AgentScope ReAct 执行器
 from orchestrator.planner import AdaptivePlanner  # 自适应计划器
@@ -42,11 +43,16 @@ def build_runtime(config_root: Path) -> tuple[AdaptiveOrchestratorRuntime, Regis
     # 构建代理和技能的注册表文件路径
     agent_registry = config_root / "agents" / "registry.yaml"
     skill_registry = config_root / "skills" / "registry.yaml"
+    # 构建模型配置文件路径
+    model_config_path = config_root / "model.yaml"
 
     # 创建注册表事务管理器，确保注册表操作的原子性
     manager = RegistryTransactionManager(agent_registry, skill_registry)
     # 创建热加载器，监控注册表文件变化
     reloader = RegistryHotReloader(manager)
+    
+    # 加载模型配置
+    model_config = load_model_config(model_config_path)
 
     # 构建自适应编排运行时
     runtime = AdaptiveOrchestratorRuntime(
@@ -54,6 +60,7 @@ def build_runtime(config_root: Path) -> tuple[AdaptiveOrchestratorRuntime, Regis
         planner=AdaptivePlanner(),  # 使用自适应计划器生成执行计划
         executor=AgentScopeReActExecutor(
             fallback_executor=RuleBasedExecutor(),  # AgentScope 不可用时降级到规则执行器
+            model_config=model_config,  # 传入模型配置
         ),
         healer=SelfHealer(FailureClassifier(), max_rounds=3),  # 自愈处理器，最多3轮
         metrics=MetricsCollector(),  # 指标收集器
@@ -112,7 +119,7 @@ def cli() -> None:
     parser.add_argument(
         "--config-root",
         default="configs",
-        help="Config root folder (contains agents/registry.yaml and skills/registry.yaml)",
+        help="Config root folder (contains agents/registry.yaml, skills/registry.yaml and model.yaml)",
     )
     args = parser.parse_args()
 

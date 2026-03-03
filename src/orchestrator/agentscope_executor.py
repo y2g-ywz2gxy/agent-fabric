@@ -7,19 +7,20 @@ AgentScope ReAct 执行器模块
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from config.model_config import ModelConfig
 from orchestrator.result import ExecutionResult
 
 
 @dataclass(slots=True, frozen=True)
 class AgentScopeRuntimeConfig:
     """
-    AgentScope 运行时配置数据类
+    AgentScope 运行时配置数据类（兼容旧版本）
     
     存储执行器所需的配置信息，包括是否启用、提供商、模型名称和 API 密钥。
+    推荐使用 ModelConfig 类代替。
     
     属性:
         enabled: 是否启用 AgentScope 执行器
@@ -33,9 +34,27 @@ class AgentScopeRuntimeConfig:
     api_key: str | None  # API 密钥
 
     @classmethod
+    def from_model_config(cls, config: ModelConfig) -> "AgentScopeRuntimeConfig":
+        """
+        从 ModelConfig 创建配置实例
+        
+        参数:
+            config: ModelConfig 实例
+            
+        返回:
+            AgentScopeRuntimeConfig 实例
+        """
+        return cls(
+            enabled=config.enabled,
+            provider=config.provider,
+            model_name=config.model_name,
+            api_key=config.api_key,
+        )
+
+    @classmethod
     def from_env(cls) -> "AgentScopeRuntimeConfig":
         """
-        从环境变量创建配置实例
+        从环境变量创建配置实例（已废弃，建议使用配置文件）
         
         读取以下环境变量：
         - AGENTSCOPE_EXECUTOR_ENABLED: 是否启用
@@ -46,16 +65,9 @@ class AgentScopeRuntimeConfig:
         返回:
             AgentScopeRuntimeConfig 实例
         """
-        enabled_flag = os.getenv("AGENTSCOPE_EXECUTOR_ENABLED", "0").strip().lower()
-        provider = os.getenv("AGENTSCOPE_MODEL_PROVIDER", "openai").strip().lower()
-        model_name = os.getenv("AGENTSCOPE_MODEL_NAME", "gpt-4o-mini").strip()
-        api_key = os.getenv("AGENTSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
-        return cls(
-            enabled=enabled_flag in {"1", "true", "yes", "on"},
-            provider=provider,
-            model_name=model_name,
-            api_key=api_key,
-        )
+        # 委托给 ModelConfig.from_env()
+        model_config = ModelConfig.from_env()
+        return cls.from_model_config(model_config)
 
     def is_usable(self) -> bool:
         """
@@ -85,8 +97,9 @@ class AgentScopeReActExecutor:
     
     属性:
         _fallback_executor: 回退执行器
-        _runtime_config: 运行时配置
+        _model_config: 模型配置实例
         _sys_prompt: 系统提示词
+        _max_iters: 最大迭代次数
         _agent: ReAct 代理实例
         _init_error: 初始化错误信息
     """
@@ -94,22 +107,43 @@ class AgentScopeReActExecutor:
         self,
         fallback_executor: Any,
         *,
+        model_config: ModelConfig | None = None,
         runtime_config: AgentScopeRuntimeConfig | None = None,
         sys_prompt: str | None = None,
+        max_iters: int = 5,
     ) -> None:
         """
         初始化 AgentScope ReAct 执行器
         
         参数:
             fallback_executor: 回退执行器，当 AgentScope 不可用时使用
-            runtime_config: 运行时配置（可选，默认从环境变量读取）
+            model_config: 模型配置实例（推荐）
+            runtime_config: 运行时配置（兼容旧版本，不推荐）
             sys_prompt: 系统提示词（可选）
+            max_iters: 最大迭代次数（可选，默认从配置读取）
         """
         self._fallback_executor = fallback_executor
-        self._runtime_config = runtime_config or AgentScopeRuntimeConfig.from_env()
-        self._sys_prompt = sys_prompt or (
-            "你是一个自适应编排执行代理。根据计划步骤执行任务并输出结构化结果。"
-        )
+        
+        # 优先使用 model_config，其次兼容 runtime_config
+        if model_config is not None:
+            self._model_config = model_config
+        elif runtime_config is not None:
+            # 从 runtime_config 转换
+            self._model_config = ModelConfig(
+                enabled=runtime_config.enabled,
+                provider=runtime_config.provider,
+                model_name=runtime_config.model_name,
+                api_key=runtime_config.api_key,
+            )
+        else:
+            # 默认从环境变量创建（兼容旧版本）
+            self._model_config = ModelConfig.from_env()
+        
+        # 系统提示词：优先参数，其次配置文件，最后默认值
+        self._sys_prompt = sys_prompt or self._model_config.react.sys_prompt
+        # 最大迭代次数：优先参数，其次配置文件，最后默认值
+        self._max_iters = max_iters if max_iters != 5 else self._model_config.react.max_iters
+        
         self._agent = None  # 延迟初始化
         self._init_error: str | None = None
 
@@ -127,7 +161,7 @@ class AgentScopeReActExecutor:
             执行结果
         """
         # 检查配置是否可用
-        if not self._runtime_config.is_usable():
+        if not self._model_config.is_usable():
             result = self._fallback_executor.execute(query, plan_data)
             return self._mark_degraded(result, reason="agentscope_not_enabled_or_missing_credentials")
 
@@ -194,22 +228,32 @@ class AgentScopeReActExecutor:
             # 初始化 AgentScope
             init(project="adaptive-orchestrator", name="agentscope-react-executor")
 
-            provider = self._runtime_config.provider
-            model_name = self._runtime_config.model_name
-            api_key = self._runtime_config.api_key
+            provider = self._model_config.provider
+            model_name = self._model_config.model_name
+            api_key = self._model_config.api_key
+            provider_config = self._model_config.get_provider_config()
 
             # 根据提供商创建对应的模型和格式化器
             if provider == "openai":
-                model = OpenAIChatModel(model_name=model_name, api_key=api_key, stream=False)
+                model_kwargs = {"model_name": model_name, "api_key": api_key, "stream": provider_config.stream}
+                if provider_config.base_url:
+                    model_kwargs["base_url"] = provider_config.base_url
+                model = OpenAIChatModel(**model_kwargs)
                 formatter = OpenAIChatFormatter()
             elif provider == "dashscope":
-                model = DashScopeChatModel(model_name=model_name, api_key=api_key, stream=False)
+                model_kwargs = {"model_name": model_name, "api_key": api_key, "stream": provider_config.stream}
+                if provider_config.base_url:
+                    model_kwargs["base_url"] = provider_config.base_url
+                model = DashScopeChatModel(**model_kwargs)
                 formatter = DashScopeChatFormatter()
             elif provider == "ollama":
-                model = OllamaChatModel(model_name=model_name, stream=False)
+                model_kwargs = {"model_name": model_name, "stream": provider_config.stream}
+                if provider_config.base_url:
+                    model_kwargs["base_url"] = provider_config.base_url
+                model = OllamaChatModel(**model_kwargs)
                 formatter = OllamaChatFormatter()
             else:
-                raise ValueError(f"Unsupported AGENTSCOPE_MODEL_PROVIDER: {provider}")
+                raise ValueError(f"Unsupported model provider: {provider}")
 
             # 创建 ReAct 代理
             self._agent = ReActAgent(
@@ -217,7 +261,7 @@ class AgentScopeReActExecutor:
                 sys_prompt=self._sys_prompt,
                 model=model,
                 formatter=formatter,
-                max_iters=5,  # 最大迭代次数
+                max_iters=self._max_iters,
             )
             self._init_error = None
             return True
