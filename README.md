@@ -1,26 +1,25 @@
 # AgentScope Adaptive Orchestrator
 
-基于 Python 的自适应编排 Agent 骨架，包含：
+基于 Python 的 AgentScope-first 自适应编排器，包含：
 
-- Orchestrator 主循环（route -> plan -> execute -> heal）
-- 配置驱动注册表与热加载（原子切换 + 回滚）
-- RAG 混合检索（关键词 + 向量，向量故障自动降级）
-- 基础可观测指标与失败分类/自愈策略
+- LLM 路由（route）
+- LLM 计划（plan）
+- AgentScope ReAct 执行（execute）
+- LLM 自愈（heal）
+- 注册表热加载、状态机、会话持久化（JSONSession）
 
-## 快速运行
-
-```bash
-PYTHONPATH=src python3 -m main "请做预算分析并生成方案"
-```
-
-## 启用 AgentScope ReAct 执行器
-
-默认使用降级执行器（不调用外部模型）。如需启用真实 AgentScope ReActAgent：
+## 快速运行（多轮 REPL）
 
 ```bash
-export AGENTSCOPE_EXECUTOR_ENABLED=1
-export AGENTSCOPE_MODEL_PROVIDER=openai
-export AGENTSCOPE_MODEL_NAME=gpt-4o-mini
-export OPENAI_API_KEY=your_api_key
-PYTHONPATH=src python3 -m main "请做预算分析并生成方案"
+PYTHONPATH=src python3 -m main \
+  --config-root configs \
+  --session-id demo \
+  --sessions-dir .sessions
 ```
+
+退出命令：`exit` / `quit` / `/exit`
+
+## 模型配置
+
+在 `configs/model.yaml` 中配置 provider / model / api_key；
+当配置不可用时，运行时会严格失败，不使用规则兜底。

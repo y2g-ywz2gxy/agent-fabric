@@ -1,29 +1,39 @@
 # -*- coding: utf-8 -*-
 """
-编排器模块
+编排器模块。
 
 提供自适应编排运行时的核心组件：
-- Router: 路由器，负责场景识别和能力匹配
-- Planner: 计划器，负责生成执行计划
-- Executor: 执行器，负责任务执行
-- Healer: 自愈器，负责故障恢复
-- RuntimeStateMachine: 状态机，管理运行时状态
+- Router: LLM 路由器
+- Planner: LLM 计划器
+- Executor: AgentScope ReAct 执行器
+- Healer: LLM 自愈器
+- RuntimeStateMachine: 状态机
 """
+from orchestrator.agentscope_executor import AgentScopeReActExecutor, AgentScopeRuntimeConfig
+from orchestrator.healing import FailureType, LLMFailureClassifier, LLMSelfHealer
 from orchestrator.interfaces import Executor, Healer, OrchestrationContext, Planner, Router
+from orchestrator.planner import AgentScopePlanner
 from orchestrator.result import ExecutionResult, ExecutionStatus
-from orchestrator.runtime import AdaptiveOrchestratorRuntime, RuleBasedExecutor
+from orchestrator.router import AgentScopeRouter
+from orchestrator.runtime import AdaptiveOrchestratorRuntime
 from orchestrator.state import RuntimeState, RuntimeStateMachine
 
 __all__ = [
     "AdaptiveOrchestratorRuntime",
+    "AgentScopePlanner",
+    "AgentScopeReActExecutor",
+    "AgentScopeRouter",
+    "AgentScopeRuntimeConfig",
     "ExecutionResult",
     "ExecutionStatus",
     "Executor",
+    "FailureType",
     "Healer",
+    "LLMFailureClassifier",
+    "LLMSelfHealer",
     "OrchestrationContext",
     "Planner",
     "Router",
-    "RuleBasedExecutor",
     "RuntimeState",
     "RuntimeStateMachine",
 ]

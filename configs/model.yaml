@@ -10,18 +10,18 @@ schema_version: "1.0"
 executor:
   # 是否启用 AgentScope 执行器
   # 设置为 false 时将使用规则执行器作为降级方案
-  enabled: false
+  enabled: true
   
   # 模型提供商: openai / dashscope / ollama
-  provider: openai
+  provider: dashscope
   
   # 模型名称
-  model_name: gpt-4o-mini
+  model_name: qwen3-max
   
   # API 密钥（建议使用环境变量覆盖）
   # 对于 openai 和 dashscope 提供商，需要配置 API 密钥
   # 对于 ollama 提供商，此项可留空
-  # api_key: ${OPENAI_API_KEY}  # 支持环境变量引用
+  api_key: "sk-660d43f7783249aaae2ee947b5e3a813"  # 支持环境变量引用
   
   # ReAct 代理配置
   react:
@@ -47,6 +47,7 @@ providers:
     
   dashscope:
     # 阿里云 DashScope 配置
+    base_url: https://api.dashscope.com/v1
     stream: false
     
   ollama:

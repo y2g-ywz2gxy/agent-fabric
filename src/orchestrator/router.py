@@ -1,129 +1,146 @@
 # -*- coding: utf-8 -*-
 """
-路由器模块
+LLM 路由器模块。
 
-该模块提供了基于关键字的路由器实现，负责根据用户查询
-识别场景并匹配相应的能力和执行单元。
+基于 AgentScope + ReActAgent 对用户查询进行场景识别、能力匹配与候选单元选择。
 """
 from __future__ import annotations
 
+from typing import Any
+
+from agentscope.agent import ReActAgent
+from agentscope.message import Msg
+from pydantic import BaseModel, Field
+
+from config.model_config import ModelConfig
+from orchestrator.agentscope_runtime import AgentScopeFactory, run_async
 from orchestrator.result import ExecutionResult
 from registry.schema import RegistryEntry, RegistrySnapshot
 
 
-class KeywordRouter:
-    """
-    关键字路由器
-    
-    基于预定义的关键字规则进行场景识别和能力匹配。
-    支持金融、支持、调研等场景的自动识别。
-    
-    属性:
-        _SCENE_RULES: 场景规则元组，定义场景、关键字和能力映射
-    """
-    # 场景规则定义：(场景名称, 关键字元组, 所需能力元组)
-    _SCENE_RULES: tuple[tuple[str, tuple[str, ...], tuple[str, ...]], ...] = (
-        (
-            "finance",  # 金融场景
-            ("预算", "报销", "发票", "财务", "成本"),  # 金融相关关键字
-            ("finance.analysis", "planning.decompose"),  # 所需能力
-        ),
-        (
-            "support",  # 支持场景
-            ("故障", "报错", "无法", "超时", "异常", "修复"),  # 支持相关关键字
-            ("support.troubleshoot", "recovery.heal"),  # 所需能力
-        ),
-        (
-            "research",  # 调研场景
-            ("调研", "研究", "报告", "竞品", "市场"),  # 调研相关关键字
-            ("research.rag", "planning.decompose"),  # 所需能力
-        ),
-    )
+class RouteDecision(BaseModel):
+    """路由决策结构化输出。"""
 
-    def __init__(self, fallback_capability: str = "general.assistant") -> None:
-        """
-        初始化关键字路由器
-        
-        参数:
-            fallback_capability: 默认回退能力，当无法匹配任何场景时使用
-        """
-        self._fallback_capability = fallback_capability
+    scene: str = Field(description="识别的任务场景")
+    required_capabilities: list[str] = Field(
+        description="完成任务所需能力列表，使用注册表中已有 capability 名称"
+    )
+    candidate_ids: list[str] = Field(
+        default_factory=list,
+        description="建议执行的 agent/skill 的 registry entry id 列表",
+    )
+    reasoning: str = Field(default="", description="简要推理理由")
+
+
+class AgentScopeRouter:
+    """基于 LLM 的路由器。"""
+
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        *,
+        sys_prompt: str | None = None,
+        max_iters: int = 4,
+    ) -> None:
+        self._factory = AgentScopeFactory(model_config=model_config)
+        self._sys_prompt = sys_prompt or (
+            "你是编排路由代理。请根据用户目标与 registry 信息，输出场景、"
+            "能力清单和候选 entry id。只输出结构化结果。"
+        )
+        self._max_iters = max_iters
+        self._agent: ReActAgent | None = None
 
     def route(self, query: str, registry_snapshot: RegistrySnapshot) -> ExecutionResult:
-        """
-        执行路由逻辑
-        
-        根据用户查询识别场景，匹配注册表中的能力和执行单元。
-        
-        参数:
-            query: 用户查询字符串
-            registry_snapshot: 注册表快照
-            
-        返回:
-            包含场景、能力和候选执行单元的执行结果
-        """
-        normalized = query.strip()  # 规范化查询字符串
+        """执行 LLM 路由。"""
+        normalized = query.strip()
         if not normalized:
             return ExecutionResult.failure("Routing failed: query is empty.")
 
-        # 推断场景和所需能力
-        scene, required_capabilities = self._infer_scene(normalized)
-        # 从注册表中查找匹配的条目
-        matched_entries = registry_snapshot.find_by_capabilities(required_capabilities)
+        try:
+            decision = self._llm_route(normalized, registry_snapshot)
+        except Exception as exc:
+            return ExecutionResult.failure(f"Routing failed: {exc}")
 
-        if matched_entries:
-            # 提取匹配的能力列表
-            matched_capabilities = sorted(
-                {
-                    capability
-                    for entry in matched_entries
-                    for capability in entry.capabilities
-                    if capability in set(required_capabilities)
-                }
-            )
-        else:
-            # 没有匹配时使用回退能力
-            matched_capabilities = [self._fallback_capability]
+        required_capabilities = [c for c in decision.required_capabilities if c]
+        candidate_entries = self._resolve_candidates(decision.candidate_ids, registry_snapshot)
+        if not candidate_entries and required_capabilities:
+            candidate_entries = list(registry_snapshot.find_by_capabilities(required_capabilities))
 
-        # 构建返回结果
+        required_set = set(required_capabilities)
+        matched_capabilities = sorted(
+            {
+                capability
+                for entry in candidate_entries
+                for capability in entry.capabilities
+                if capability in required_set
+            }
+        )
+
         payload = {
-            "scene": scene,  # 识别的场景
-            "required_capabilities": list(required_capabilities),  # 所需能力
-            "matched_capabilities": matched_capabilities,  # 匹配的能力
-            "candidates": [self._entry_to_payload(entry) for entry in matched_entries],  # 候选执行单元
+            "scene": decision.scene,
+            "required_capabilities": required_capabilities,
+            "matched_capabilities": matched_capabilities,
+            "candidates": [self._entry_to_payload(entry) for entry in candidate_entries],
+            "llm_reasoning": decision.reasoning,
         }
         return ExecutionResult.success(payload, next_action="plan")
 
-    def _infer_scene(self, query: str) -> tuple[str, tuple[str, ...]]:
-        """
-        推断查询所属场景
-        
-        根据关键字规则判断查询属于哪个场景。
-        
-        参数:
-            query: 用户查询字符串
-            
-        返回:
-            元组包含场景名称和所需能力列表
-        """
-        lowered = query.lower()
-        for scene, keywords, capabilities in self._SCENE_RULES:
-            if any(keyword in lowered for keyword in keywords):
-                return scene, capabilities
-        # 未匹配任何场景时返回通用场景
-        return "generic", (self._fallback_capability,)
+    def _llm_route(self, query: str, registry_snapshot: RegistrySnapshot) -> RouteDecision:
+        """调用 LLM 获取结构化路由决策。"""
+        agent = self._ensure_agent()
+        registry_text = self._registry_to_prompt(registry_snapshot)
+        user_msg = Msg(
+            name="user",
+            role="user",
+            content=(
+                "请完成路由决策。\n"
+                f"用户查询:\n{query}\n\n"
+                "可用 registry:\n"
+                f"{registry_text}\n"
+                "要求:\n"
+                "1. required_capabilities 只能使用 registry 中出现的能力名称；\n"
+                "2. candidate_ids 尽量从 registry entry id 中选择；\n"
+                "3. scene 使用简洁英文标识。"
+            ),
+        )
+        reply = run_async(agent(user_msg, structured_model=RouteDecision))
+        metadata = getattr(reply, "metadata", None) or {}
+        return RouteDecision.model_validate(metadata)
+
+    def _ensure_agent(self) -> ReActAgent:
+        """延迟初始化路由 Agent。"""
+        if self._agent is not None:
+            return self._agent
+
+        model, formatter = self._factory.create_model_and_formatter()
+        self._agent = ReActAgent(
+            name="orchestrator_router",
+            sys_prompt=self._sys_prompt,
+            model=model,
+            formatter=formatter,
+            max_iters=self._max_iters,
+        )
+        return self._agent
 
     @staticmethod
-    def _entry_to_payload(entry: RegistryEntry) -> dict[str, object]:
-        """
-        将注册表条目转换为返回数据格式
-        
-        参数:
-            entry: 注册表条目
-            
-        返回:
-            包含条目信息的字典
-        """
+    def _resolve_candidates(ids: list[str], snapshot: RegistrySnapshot) -> list[RegistryEntry]:
+        id_set = {entry_id for entry_id in ids if entry_id}
+        if not id_set:
+            return []
+        return [entry for entry in snapshot.all_entries if entry.id in id_set]
+
+    @staticmethod
+    def _registry_to_prompt(snapshot: RegistrySnapshot) -> str:
+        lines: list[str] = []
+        for entry in snapshot.all_entries:
+            lines.append(
+                f"- id={entry.id}; source={entry.source}; capabilities={list(entry.capabilities)}; "
+                f"entrypoint={entry.entrypoint}; version={entry.version}"
+            )
+        return "\n".join(lines) if lines else "(empty registry)"
+
+    @staticmethod
+    def _entry_to_payload(entry: RegistryEntry) -> dict[str, Any]:
         return {
             "id": entry.id,
             "source": entry.source,

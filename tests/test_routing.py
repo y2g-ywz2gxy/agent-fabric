@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from orchestrator.router import KeywordRouter
+from config.model_config import ModelConfig
+from orchestrator.router import AgentScopeRouter, RouteDecision
 from registry.schema import RegistryEntry, RegistrySnapshot
 
 
@@ -19,7 +20,7 @@ def _snapshot() -> RegistrySnapshot:
             ),
             RegistryEntry(
                 id="support-triage-agent",
-                capabilities=("support.troubleshoot", "recovery.heal"),
+                capabilities=("support.troubleshoot", "healing.resolve"),
                 entrypoint="agents.support:run",
                 dependencies=("toolkit",),
                 healthcheck="ok",
@@ -41,26 +42,62 @@ def _snapshot() -> RegistrySnapshot:
     )
 
 
-def test_router_matches_finance_scene() -> None:
-    result = KeywordRouter().route("请帮我分析本月预算成本", _snapshot())
+def _router() -> AgentScopeRouter:
+    return AgentScopeRouter(
+        model_config=ModelConfig(
+            enabled=True,
+            provider="ollama",
+            model_name="qwen2.5:latest",
+            api_key=None,
+        )
+    )
+
+
+def test_router_maps_llm_decision_to_candidates(monkeypatch) -> None:
+    router = _router()
+
+    monkeypatch.setattr(
+        router,
+        "_llm_route",
+        lambda query, snapshot: RouteDecision(
+            scene="finance",
+            required_capabilities=["finance.analysis", "planning.decompose"],
+            candidate_ids=["finance-router-agent"],
+            reasoning="budget analysis",
+        ),
+    )
+
+    result = router.route("请帮我分析预算", _snapshot())
 
     assert result.ok
     assert result.data["scene"] == "finance"
     assert "finance.analysis" in result.data["required_capabilities"]
-    assert result.data["candidates"]
+    assert result.data["candidates"][0]["id"] == "finance-router-agent"
 
 
-def test_router_matches_support_scene() -> None:
-    result = KeywordRouter().route("系统报错，无法登录，需要排障", _snapshot())
+def test_router_fails_for_empty_query() -> None:
+    result = _router().route("   ", _snapshot())
 
-    assert result.ok
-    assert result.data["scene"] == "support"
-    assert "support.troubleshoot" in result.data["required_capabilities"]
+    assert not result.ok
+    assert "query is empty" in (result.error or "")
 
 
-def test_router_matches_research_scene() -> None:
-    result = KeywordRouter().route("请做竞品调研并输出研究报告", _snapshot())
+def test_router_falls_back_to_capability_search_when_candidate_ids_empty(monkeypatch) -> None:
+    router = _router()
+
+    monkeypatch.setattr(
+        router,
+        "_llm_route",
+        lambda query, snapshot: RouteDecision(
+            scene="research",
+            required_capabilities=["research.rag"],
+            candidate_ids=[],
+            reasoning="need rag",
+        ),
+    )
+
+    result = router.route("请做调研", _snapshot())
 
     assert result.ok
     assert result.data["scene"] == "research"
-    assert "research.rag" in result.data["required_capabilities"]
+    assert result.data["candidates"][0]["id"] == "market-rag-skill"

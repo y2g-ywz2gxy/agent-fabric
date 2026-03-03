@@ -43,6 +43,7 @@ _ALLOWED_TRANSITIONS: dict[RuntimeState, set[RuntimeState]] = {
     RuntimeState.PLANNING: {RuntimeState.EXECUTING, RuntimeState.HEALING, RuntimeState.FAILED},  # 计划后可进入执行、自愈或失败
     RuntimeState.EXECUTING: {RuntimeState.HEALING, RuntimeState.COMPLETED, RuntimeState.FAILED},  # 执行后可进入自愈、完成或失败
     RuntimeState.HEALING: {  # 自愈后可进入计划、执行、完成或失败
+        RuntimeState.ROUTING,
         RuntimeState.PLANNING,
         RuntimeState.EXECUTING,
         RuntimeState.COMPLETED,

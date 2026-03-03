@@ -1,87 +1,45 @@
 # -*- coding: utf-8 -*-
 """
-自适应编排运行时模块
+自适应编排运行时模块。
 
-该模块提供了编排运行时的核心实现，包括：
-- RuleBasedExecutor: 基于规则的执行器（作为降级方案）
-- AdaptiveOrchestratorRuntime: 自适应编排运行时
+基于 AgentScope pipeline 串联 route -> plan -> execute，
+并在失败后通过 healer 进行 LLM 自愈决策。
 """
 from __future__ import annotations
 
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable
+
+from agentscope.agent import AgentBase
+from agentscope.message import Msg
+from agentscope.pipeline import SequentialPipeline
 
 from observability.metrics import MetricsCollector
+from orchestrator.agentscope_runtime import run_async
 from orchestrator.interfaces import Executor, Healer, OrchestrationContext, Planner, Router
 from orchestrator.result import ExecutionResult
 from orchestrator.state import RuntimeState, RuntimeStateMachine
 from registry.schema import RegistrySnapshot
 
 
-class RuleBasedExecutor:
-    """
-    基于规则的执行器
-    
-    当 AgentScope 执行器不可用时作为降级方案使用。
-    根据查询中的关键字判断执行结果。
-    """
-    def execute(self, query: str, plan_data: Mapping[str, Any]) -> ExecutionResult:
-        """
-        执行任务
-        
-        根据查询中的关键字模拟不同的执行结果。
-        
-        参数:
-            query: 用户查询字符串
-            plan_data: 执行计划数据
-            
-        返回:
-            执行结果
-        """
-        lowered = query.lower()
-        # 模拟超时错误
-        if "timeout" in lowered or "超时" in lowered:
-            return ExecutionResult.failure(
-                "Execution failed: timeout while calling tool.",
-                {"plan": plan_data},
-            )
-        # 模拟依赖服务不可用错误
-        if "dependency" in lowered or "依赖" in lowered:
-            return ExecutionResult.failure(
-                "Execution failed: dependency service unavailable.",
-                {"plan": plan_data},
-            )
-        # 模拟工具错误
-        if "tool_error" in lowered or "工具异常" in lowered:
-            return ExecutionResult.failure(
-                "Execution failed: tool error.",
-                {"plan": plan_data},
-            )
+class _StageAgent(AgentBase):
+    """将任意异步处理函数适配成 AgentScope Agent。"""
 
-        # 正常执行返回成功结果
-        response = {
-            "answer": "任务已通过自适应编排链路执行完成。",
-            "plan_steps": len(plan_data.get("steps", [])),
-            "plan": plan_data,
-        }
-        return ExecutionResult.success(response, next_action="completed")
+    def __init__(self, name: str, handler: Callable[[Msg | list[Msg] | None], Awaitable[Msg]]) -> None:
+        super().__init__()
+        self.name = name
+        self._handler = handler
+        self.register_state("name")
+
+    async def observe(self, msg: Msg | list[Msg] | None) -> None:
+        _ = msg
+
+    async def reply(self, msg: Msg | list[Msg] | None = None) -> Msg:
+        return await self._handler(msg)
 
 
 class AdaptiveOrchestratorRuntime:
-    """
-    自适应编排运行时
-    
-    编排系统的核心运行时，协调路由器、计划器、执行器和自愈器
-    完成完整的编排流程。支持重试和自愈机制。
-    
-    属性:
-        router: 路由器实例
-        planner: 计划器实例
-        executor: 执行器实例
-        healer: 自愈器实例
-        metrics: 指标收集器
-        max_replans: 最大重计划次数
-        state_machine: 状态机实例
-    """
+    """自适应编排运行时。"""
+
     def __init__(
         self,
         router: Router,
@@ -92,17 +50,6 @@ class AdaptiveOrchestratorRuntime:
         *,
         max_replans: int = 2,
     ) -> None:
-        """
-        初始化自适应编排运行时
-        
-        参数:
-            router: 路由器实例
-            planner: 计划器实例
-            executor: 执行器实例
-            healer: 自愈器实例
-            metrics: 指标收集器（可选）
-            max_replans: 最大重计划次数
-        """
         self.router = router
         self.planner = planner
         self.executor = executor
@@ -110,94 +57,117 @@ class AdaptiveOrchestratorRuntime:
         self.metrics = metrics or MetricsCollector()
         self.max_replans = max(0, max_replans)
         self.state_machine = RuntimeStateMachine()
+        self.last_context: OrchestrationContext | None = None
 
     def run(self, query: str, registry_snapshot: RegistrySnapshot) -> ExecutionResult:
-        """
-        执行编排流程
-        
-        完整的编排流程：路由 -> 计划 -> 执行 -> 自愈（如果需要）
-        
-        参数:
-            query: 用户查询字符串
-            registry_snapshot: 注册表快照
-            
-        返回:
-            编排执行结果
-        """
-        # 创建编排上下文
+        """执行一轮编排。"""
+        self.state_machine = RuntimeStateMachine()
         context = OrchestrationContext(query=query, registry_snapshot=registry_snapshot)
-        heal_attempt = 0  # 自愈尝试次数
-        planning_retry = 0  # 重计划次数
+        self.last_context = context
 
-        # 阶段1: 路由
-        self.state_machine.transition_to(RuntimeState.ROUTING)
-        route_result = self.router.route(query, registry_snapshot)
-        self.metrics.record("routing.completed", scene=route_result.data.get("scene", "unknown"))
-        if not route_result.ok:
-            return self._fail(route_result)
-        context.route_data = route_result.data
+        heal_attempt = 0
+        planning_retry = 0
+        execute_retry = 0
 
-        # 阶段2: 计划和执行循环
         while planning_retry <= self.max_replans:
-            # 计划阶段
-            self.state_machine.transition_to(RuntimeState.PLANNING)
-            plan_result = self.planner.plan(query, context.route_data or {}, retry=planning_retry)
-            self.metrics.record("planning.completed", retry=planning_retry)
+            route_result, plan_result, execute_result = self._run_pipeline_once(
+                query=query,
+                registry_snapshot=registry_snapshot,
+                planning_retry=planning_retry,
+                context=context,
+            )
 
-            # 计划失败时尝试自愈
-            if not plan_result.ok:
-                heal_result = self._heal(plan_result, context, attempt=heal_attempt)
-                heal_attempt += 1
-                if heal_result.ok and heal_result.next_action == "replan":
-                    planning_retry += 1
-                    continue
-                return self._fail(heal_result)
+            if route_result.ok:
+                context.route_data = route_result.data
+            if plan_result.ok:
+                context.plan_data = plan_result.data
 
-            context.plan_data = plan_result.data
-            replan_requested = False
-            execute_retry = 0
-            
-            # 执行阶段
-            while True:
-                self.state_machine.transition_to(RuntimeState.EXECUTING)
-                execute_result = self.executor.execute(query, context.plan_data or {})
-                self.metrics.record("execution.completed", success=execute_result.ok)
+            if execute_result.ok:
+                self.state_machine.transition_to(RuntimeState.COMPLETED)
+                return execute_result
 
-                # 执行成功则返回
-                if execute_result.ok:
-                    self.state_machine.transition_to(RuntimeState.COMPLETED)
-                    return execute_result
+            failed_result = self._pick_failed_result(route_result, plan_result, execute_result)
+            heal_result = self._heal(failed_result, context, attempt=heal_attempt)
+            heal_attempt += 1
 
-                # 执行失败时尝试自愈
-                heal_result = self._heal(execute_result, context, attempt=heal_attempt)
-                heal_attempt += 1
-                
-                # 根据自愈结果决定下一步
-                if heal_result.ok and heal_result.next_action == "retry_execute":
-                    execute_retry += 1
-                    if execute_retry > self.max_replans:
-                        return self._fail(
-                            ExecutionResult.failure(
-                                "Execution failed: exceeded retry_execute limit."
-                            )
+            if heal_result.ok and heal_result.next_action == "retry_execute":
+                execute_retry += 1
+                if execute_retry > self.max_replans:
+                    return self._fail(
+                        ExecutionResult.failure(
+                            "Execution failed: exceeded retry_execute limit.",
+                            next_action="abort",
                         )
-                    continue
-
-                if heal_result.ok and heal_result.next_action == "replan":
-                    planning_retry += 1
-                    replan_requested = True
-                    break
-
-                if heal_result.ok and heal_result.next_action == "completed":
-                    self.state_machine.transition_to(RuntimeState.COMPLETED)
-                    return heal_result
-
-                return self._fail(heal_result)
-
-            if replan_requested:
+                    )
                 continue
 
-        return self._fail(ExecutionResult.failure("Execution failed: exceeded replan limit."))
+            if heal_result.ok and heal_result.next_action == "replan":
+                planning_retry += 1
+                execute_retry = 0
+                continue
+
+            if heal_result.ok and heal_result.next_action == "completed":
+                self.state_machine.transition_to(RuntimeState.COMPLETED)
+                return heal_result
+
+            return self._fail(heal_result)
+
+        return self._fail(
+            ExecutionResult.failure("Execution failed: exceeded replan limit.", next_action="abort")
+        )
+
+    def _run_pipeline_once(
+        self,
+        *,
+        query: str,
+        registry_snapshot: RegistrySnapshot,
+        planning_retry: int,
+        context: OrchestrationContext,
+    ) -> tuple[ExecutionResult, ExecutionResult, ExecutionResult]:
+        """运行一轮 route->plan->execute pipeline。"""
+        route_result: ExecutionResult = ExecutionResult.failure("Routing stage not executed.")
+        plan_result: ExecutionResult = ExecutionResult.failure("Planning stage not executed.")
+        execute_result: ExecutionResult = ExecutionResult.failure("Execution stage not executed.")
+
+        async def route_stage(msg: Msg | list[Msg] | None) -> Msg:
+            nonlocal route_result
+            self.state_machine.transition_to(RuntimeState.ROUTING)
+            route_result = self.router.route(query, registry_snapshot)
+            self.metrics.record("routing.completed", success=route_result.ok)
+            return _ensure_msg(msg)
+
+        async def plan_stage(msg: Msg | list[Msg] | None) -> Msg:
+            nonlocal plan_result
+            if not route_result.ok:
+                plan_result = ExecutionResult.failure("Planning skipped due to routing failure.")
+                return _ensure_msg(msg)
+
+            self.state_machine.transition_to(RuntimeState.PLANNING)
+            plan_result = self.planner.plan(query, route_result.data, retry=planning_retry)
+            self.metrics.record("planning.completed", success=plan_result.ok, retry=planning_retry)
+            return _ensure_msg(msg)
+
+        async def execute_stage(msg: Msg | list[Msg] | None) -> Msg:
+            nonlocal execute_result
+            if not plan_result.ok:
+                execute_result = ExecutionResult.failure("Execution skipped due to planning failure.")
+                return _ensure_msg(msg)
+
+            self.state_machine.transition_to(RuntimeState.EXECUTING)
+            execute_result = self.executor.execute(query, plan_result.data)
+            self.metrics.record("execution.completed", success=execute_result.ok)
+            return _ensure_msg(msg)
+
+        pipeline = SequentialPipeline(
+            agents=[
+                _StageAgent("stage-router", route_stage),
+                _StageAgent("stage-planner", plan_stage),
+                _StageAgent("stage-executor", execute_stage),
+            ]
+        )
+
+        run_async(pipeline(Msg(name="user", role="user", content=query)))
+        return route_result, plan_result, execute_result
 
     def _heal(
         self,
@@ -206,17 +176,7 @@ class AdaptiveOrchestratorRuntime:
         *,
         attempt: int,
     ) -> ExecutionResult:
-        """
-        执行自愈处理
-        
-        参数:
-            failed_result: 失败的执行结果
-            context: 编排上下文
-            attempt: 当前尝试次数
-            
-        返回:
-            自愈处理结果
-        """
+        """执行自愈。"""
         self.state_machine.transition_to(RuntimeState.HEALING)
         self.metrics.record("healing.triggered", attempt=attempt)
         heal_result = self.healer.heal(failed_result, context, attempt=attempt)
@@ -227,15 +187,28 @@ class AdaptiveOrchestratorRuntime:
         return heal_result
 
     def _fail(self, result: ExecutionResult) -> ExecutionResult:
-        """
-        标记执行失败
-        
-        参数:
-            result: 失败的执行结果
-            
-        返回:
-            原始失败结果
-        """
+        """标记失败。"""
         if self.state_machine.state is not RuntimeState.FAILED:
             self.state_machine.transition_to(RuntimeState.FAILED)
         return result
+
+    @staticmethod
+    def _pick_failed_result(
+        route_result: ExecutionResult,
+        plan_result: ExecutionResult,
+        execute_result: ExecutionResult,
+    ) -> ExecutionResult:
+        if not route_result.ok:
+            return route_result
+        if not plan_result.ok:
+            return plan_result
+        return execute_result
+
+
+def _ensure_msg(msg: Msg | list[Msg] | None) -> Msg:
+    """pipeline 过程中统一返回 Msg。"""
+    if isinstance(msg, Msg):
+        return msg
+    if isinstance(msg, list) and msg:
+        return msg[-1]
+    return Msg(name="system", role="assistant", content="")
