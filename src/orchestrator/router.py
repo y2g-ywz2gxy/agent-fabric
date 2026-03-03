@@ -134,8 +134,9 @@ class AgentScopeRouter:
         lines: list[str] = []
         for entry in snapshot.all_entries:
             lines.append(
-                f"- id={entry.id}; source={entry.source}; capabilities={list(entry.capabilities)}; "
-                f"entrypoint={entry.entrypoint}; version={entry.version}"
+                f"- id={entry.id}; source={entry.source}; origin={entry.origin}; "
+                f"capabilities={list(entry.capabilities)}; description={entry.description}; "
+                f"loader={entry.loader_kind}:{entry.loader_target}; version={entry.version}"
             )
         return "\n".join(lines) if lines else "(empty registry)"
 
@@ -144,8 +145,12 @@ class AgentScopeRouter:
         return {
             "id": entry.id,
             "source": entry.source,
+            "origin": entry.origin,
+            "description": entry.description,
             "capabilities": list(entry.capabilities),
             "entrypoint": entry.entrypoint,
+            "loader_kind": entry.loader_kind,
+            "loader_target": entry.loader_target,
             "healthcheck": entry.healthcheck,
             "version": entry.version,
         }

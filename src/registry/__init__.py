@@ -10,14 +10,22 @@
 """
 from registry.config_loader import load_registry_snapshot
 from registry.hot_reload import HotReloadEvent, RegistryHotReloader
+from registry.registrar import RegistrationResult, RegistryRegistrar
+from registry.auto_indexer import IndexSyncResult, RegistryAutoIndexer
+from registry.builtin_provider import BuiltinRegistryProvider
 from registry.schema import RegistryEntry, RegistrySnapshot, SchemaValidationError
 from registry.transaction import RegistryTransactionManager, TransactionResult
 
 __all__ = [
     "HotReloadEvent",
+    "IndexSyncResult",
+    "BuiltinRegistryProvider",
     "RegistryEntry",
+    "RegistryAutoIndexer",
     "RegistryHotReloader",
+    "RegistryRegistrar",
     "RegistrySnapshot",
+    "RegistrationResult",
     "RegistryTransactionManager",
     "SchemaValidationError",
     "TransactionResult",

@@ -113,6 +113,7 @@ class AgentScopePlanner:
             "steps": [asdict(step) for step in steps],
             "dependencies": {step.id: step.depends_on for step in steps},
             "candidate_units": candidates,
+            "candidate_entries": list(route_data.get("candidates", [])),
             "capabilities": capabilities,
             "retry": retry,
             "agentscope_plan": agentscope_plan,

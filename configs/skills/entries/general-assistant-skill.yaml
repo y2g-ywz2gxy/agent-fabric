@@ -1,0 +1,8 @@
+id: general-assistant-skill
+capabilities:
+  - general.assistant
+entrypoint: skills.general_assistant:run
+dependencies:
+  - core-runtime
+healthcheck: python -m healthcheck.general_assistant
+version: "0.1.0"

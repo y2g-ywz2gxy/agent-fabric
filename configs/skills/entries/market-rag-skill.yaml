@@ -1,0 +1,9 @@
+id: market-rag-skill
+capabilities:
+  - research.rag
+  - planning.decompose
+entrypoint: skills.market_rag:run
+dependencies:
+  - hybrid-retriever
+healthcheck: python -m healthcheck.market_rag
+version: "0.1.0"

@@ -43,6 +43,10 @@ class RegistryEntry:
     healthcheck: str  # 健康检查配置
     version: str  # 版本号
     source: str  # 来源类型
+    description: str = ""  # 描述
+    origin: str = "dynamic"  # builtin | dynamic
+    loader_kind: str = "python_module"  # python_module | python_file | skill_md
+    loader_target: str = ""  # 加载目标（module:function / /abs/path.py:run / /abs/path/SKILL.md）
 
 
 @dataclass(slots=True, frozen=True)
@@ -131,12 +135,12 @@ def parse_registry_payload(
     entries: list[RegistryEntry] = []
     for index, raw in enumerate(raw_entries):
         entry_path = f"{source_path}:entries[{index}]"
-        entries.append(_parse_entry(raw, source=source, source_path=entry_path))
+        entries.append(parse_registry_entry(raw, source=source, source_path=entry_path))
 
     return str(schema_version), tuple(entries)
 
 
-def _parse_entry(raw: Any, *, source: str, source_path: str) -> RegistryEntry:
+def parse_registry_entry(raw: Any, *, source: str, source_path: str) -> RegistryEntry:
     """
     解析单个注册表条目
     
@@ -157,7 +161,7 @@ def _parse_entry(raw: Any, *, source: str, source_path: str) -> RegistryEntry:
         raise SchemaValidationError(f"{source_path}: entry must be a mapping")
 
     # 检查必需字段
-    required = ("id", "capabilities", "entrypoint", "dependencies", "healthcheck", "version")
+    required = ("id", "capabilities", "dependencies", "healthcheck", "version")
     missing = [key for key in required if key not in raw]
     if missing:
         raise SchemaValidationError(f"{source_path}: missing required fields: {', '.join(missing)}")
@@ -171,16 +175,54 @@ def _parse_entry(raw: Any, *, source: str, source_path: str) -> RegistryEntry:
         raise SchemaValidationError(f"{source_path}: dependencies must be a list")
     if not str(raw["healthcheck"]).strip():
         raise SchemaValidationError(f"{source_path}: healthcheck must be non-empty")
-    if not str(raw["entrypoint"]).strip():
+    raw_entrypoint = str(raw.get("entrypoint", "")).strip()
+    loader_kind = str(raw.get("loader_kind", "python_module")).strip() or "python_module"
+    loader_target = str(raw.get("loader_target", "")).strip()
+    if not raw_entrypoint and loader_target:
+        raw_entrypoint = loader_target
+    if not loader_target and raw_entrypoint:
+        loader_target = raw_entrypoint
+    if not raw_entrypoint:
         raise SchemaValidationError(f"{source_path}: entrypoint must be non-empty")
+    if loader_kind not in {"python_module", "python_file", "skill_md"}:
+        raise SchemaValidationError(
+            f"{source_path}: loader_kind must be one of python_module/python_file/skill_md"
+        )
+    if not loader_target:
+        raise SchemaValidationError(f"{source_path}: loader_target must be non-empty")
+
+    description = str(raw.get("description", "")).strip()
+    if not description:
+        description = f"{source}:{str(raw['id']).strip()}"
+    origin = str(raw.get("origin", "dynamic")).strip() or "dynamic"
+    if origin not in {"builtin", "dynamic"}:
+        raise SchemaValidationError(f"{source_path}: origin must be builtin or dynamic")
 
     # 创建并返回条目实例
     return RegistryEntry(
         id=str(raw["id"]),
         capabilities=tuple(str(capability) for capability in capabilities),
-        entrypoint=str(raw["entrypoint"]),
+        entrypoint=raw_entrypoint,
         dependencies=tuple(str(dependency) for dependency in dependencies),
         healthcheck=str(raw["healthcheck"]),
         version=str(raw["version"]),
         source=source,
+        description=description,
+        origin=origin,
+        loader_kind=loader_kind,
+        loader_target=loader_target,
     )
+
+
+def ensure_unique_entry_ids(entries: tuple[RegistryEntry, ...], *, scope: str) -> None:
+    """校验条目 ID 在指定范围内唯一。"""
+    seen: set[str] = set()
+    duplicated: set[str] = set()
+    for entry in entries:
+        if entry.id in seen:
+            duplicated.add(entry.id)
+        seen.add(entry.id)
+
+    if duplicated:
+        dup_text = ", ".join(sorted(duplicated))
+        raise SchemaValidationError(f"{scope}: duplicate entry id(s): {dup_text}")

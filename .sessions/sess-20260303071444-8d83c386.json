@@ -1,0 +1,1 @@
+{"orchestrator": {"turn_count": 1, "last_route_data": {}, "last_plan_data": {}, "last_state_history": ["initialized", "failed"], "conversation_trace": [{"turn": 1, "query": "你是谁？", "status": "failed", "next_action": "abort", "error": "Chat failed: A function with name 'view_subtasks' is already registered in the toolkit."}]}}

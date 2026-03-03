@@ -1,0 +1,14 @@
+schema_version: "1.0"
+mode: orchestrator_agent
+output_format: text_stream
+
+session:
+  resume_preview_turns: 5
+  sessions_dir: .sessions
+
+execution:
+  max_parallel: 4
+  fail_fast: true
+
+registration:
+  audit_dir: configs/audit

@@ -127,6 +127,12 @@ class OrchestratorSessionState(StateModule):
             }
         )
 
+    def recent_trace(self, limit: int) -> list[dict[str, Any]]:
+        """获取最近 N 轮会话摘要。"""
+        if limit <= 0:
+            return []
+        return list(self.conversation_trace[-limit:])
+
 
 @dataclass(slots=True)
 class JSONSessionStore:
@@ -160,6 +166,10 @@ class JSONSessionStore:
                 orchestrator=state,
             )
         )
+
+    def session_file_path(self) -> Path:
+        """返回会话文件路径。"""
+        return Path(self._session._get_save_path(self.session_id, user_id=self.user_id))
 
 
 def _ensure_agentscope_initialized(project: str) -> None:

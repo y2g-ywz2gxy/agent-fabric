@@ -12,10 +12,12 @@
 from orchestrator.agentscope_executor import AgentScopeReActExecutor, AgentScopeRuntimeConfig
 from orchestrator.healing import FailureType, LLMFailureClassifier, LLMSelfHealer
 from orchestrator.interfaces import Executor, Healer, OrchestrationContext, Planner, Router
+from orchestrator.orchestrator_session_runtime import OrchestratorSessionRuntime
 from orchestrator.planner import AgentScopePlanner
 from orchestrator.result import ExecutionResult, ExecutionStatus
 from orchestrator.router import AgentScopeRouter
 from orchestrator.runtime import AdaptiveOrchestratorRuntime
+from orchestrator.system_intent_router import SystemIntentRouter
 from orchestrator.state import RuntimeState, RuntimeStateMachine
 
 __all__ = [
@@ -31,9 +33,11 @@ __all__ = [
     "Healer",
     "LLMFailureClassifier",
     "LLMSelfHealer",
+    "OrchestratorSessionRuntime",
     "OrchestrationContext",
     "Planner",
     "Router",
     "RuntimeState",
     "RuntimeStateMachine",
+    "SystemIntentRouter",
 ]

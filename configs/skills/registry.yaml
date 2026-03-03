@@ -1,20 +1,4 @@
 schema_version: "1.0"
-entries:
-  - id: market-rag-skill
-    capabilities:
-      - research.rag
-      - planning.decompose
-    entrypoint: skills.market_rag:run
-    dependencies:
-      - hybrid-retriever
-    healthcheck: python -m healthcheck.market_rag
-    version: "0.1.0"
-
-  - id: general-assistant-skill
-    capabilities:
-      - general.assistant
-    entrypoint: skills.general_assistant:run
-    dependencies:
-      - core-runtime
-    healthcheck: python -m healthcheck.general_assistant
-    version: "0.1.0"
+entry_files:
+  - entries/general-assistant-skill.yaml
+  - entries/market-rag-skill.yaml
